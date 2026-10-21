@@ -2,45 +2,52 @@
 
 package cc.microblock.TGStickerProvider.ui.activity
 
-import android.annotation.SuppressLint
 import android.app.AlertDialog
-import android.app.ProgressDialog
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.TextView
 import android.widget.Toast
-import android.widget.VideoView
-import androidx.cardview.widget.CardView
-import androidx.core.view.isVisible
-import androidx.core.widget.doOnTextChanged
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.MutableLiveData
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import cc.microblock.TGStickerProvider.*
-import cc.microblock.TGStickerProvider.databinding.ActivityMainBinding
-import cc.microblock.TGStickerProvider.ui.activity.base.BaseActivity
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.bumptech.glide.Glide
-import com.google.android.material.imageview.ShapeableImageView
-import com.google.android.material.textview.MaterialTextView
 import com.highcapable.yukihookapi.YukiHookAPI
 import com.highcapable.yukihookapi.hook.log.YLog
 import java.io.File
+import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 
 data class StickerState(var highQuality: Int, var lowQuality: Int, var all: Int)
 data class PreviewInfo(var type: String, var url: String)
+data class OperationProgress(
+    val title: String,
+    val detail: String = "",
+    val fraction: Float? = null,
+    val expressive: Boolean = false
+)
+enum class SyncQuality(val suffix: String) { LOW("_low"), HIGH("_high") }
+data class DeleteConfirmation(
+    val title: String,
+    val message: String,
+    val confirmLabel: String,
+    val iconRes: Int,
+    val action: () -> Unit
+)
 data class StickerInfo(
     val name: String,
     val id: String,
@@ -52,162 +59,13 @@ data class StickerInfo(
     val preview: PreviewInfo
 )
 
-class RecyclerAdapterStickerList(private val act: MainActivity) :
-    RecyclerView.Adapter<RecyclerAdapterStickerList.ViewHolder>() {
-    var stickerList = listOf<StickerInfo>()
-
-    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-        val name: TextView = view.findViewById(R.id.sticker_name)
-        val id: TextView = view.findViewById(R.id.sticker_id)
-        val syncedAll: TextView = view.findViewById(R.id.syncedAll)
-        val syncedStatus: TextView = view.findViewById(R.id.syncedStatus)
-        val exportedAll: TextView = view.findViewById(R.id.exportedAll)
-        val exportedStatus: TextView = view.findViewById(R.id.exportedStatus)
-        val totalAll: TextView = view.findViewById(R.id.totalAll)
-        val syncBtn: Button = view.findViewById(R.id.syncBtn)
-        val rmBtn: MaterialTextView = view.findViewById(R.id.rmBtn)
-        val imageView: ShapeableImageView = view.findViewById(R.id.imageView)
-        val videoView: VideoView = view.findViewById(R.id.videoView)
-        val videoCard: CardView = view.findViewById(R.id.videoCard)
-        val unsupported: TextView = view.findViewById(R.id.unsupported)
-    }
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_sticker, parent, false)
-        return ViewHolder(view)
-    }
-
-    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val s = stickerList[position]
-        holder.name.text = s.name
-        holder.id.text = s.id
-        holder.syncedAll.text = s.syncedState.all.toString();
-        holder.syncedStatus.text = "低清 ${s.syncedState.lowQuality}\n高清 ${s.syncedState.highQuality}"
-        holder.exportedAll.text = s.remoteState.all.toString()
-        holder.exportedStatus.text = "低清 ${s.remoteState.lowQuality}\n高清 ${s.remoteState.highQuality}"
-        holder.totalAll.text = s.all.toString();
-
-        when (s.type) {
-            "unknown", "image/webp" -> {
-                Glide.with(act)
-                    .load(if(s.preview.type==="webp") s.preview.url else R.drawable.bg_dark_round)
-                    .error(ColorDrawable(Color.RED))
-                    .into(holder.imageView)
-                holder.videoCard.visibility = View.GONE
-                holder.imageView.visibility = View.VISIBLE
-                holder.videoView.stopPlayback()
-                holder.unsupported.visibility = View.GONE
-                holder.rmBtn.visibility = View.VISIBLE
-                holder.syncBtn.visibility = View.VISIBLE
-            }
-            "video/webm" -> {
-                holder.videoView.setVideoPath(s.preview.url)
-                holder.videoView.start()
-                holder.videoView.setOnPreparedListener {
-                    it.isLooping = true
-                    it.setVolume(0f, 0f)
-                }
-                holder.videoView.setOnErrorListener { mp, what, extra ->
-                    YLog.error("VideoView error: $what, $extra")
-                    true
-                }
-
-                holder.videoCard.visibility = View.VISIBLE
-                holder.imageView.visibility = View.GONE
-                holder.unsupported.visibility = View.GONE
-                holder.rmBtn.visibility = View.VISIBLE
-                holder.syncBtn.visibility = View.VISIBLE
-            }
-            else -> {
-                holder.imageView.visibility = View.GONE
-                holder.videoCard.visibility = View.GONE
-                holder.videoView.stopPlayback()
-                holder.rmBtn.visibility = View.VISIBLE
-                holder.syncBtn.visibility = View.GONE
-                holder.unsupported.visibility = View.VISIBLE
-                holder.unsupported.text = "不支持的表情包"
-            }
-        }
-
-        holder.syncBtn.setOnClickListener {
-            act.syncStickerPack(s, {
-                act.runOnUiThread {
-                    Toast.makeText(act, "同步完成", Toast.LENGTH_SHORT).show()
-                }
-            }, { count, reasons ->
-                act.runOnUiThread {
-                    AlertDialog.Builder(act)
-                        .setTitle("有 $count 个表情同步失败")
-                        .setMessage(reasons)
-                        .setIcon(android.R.drawable.ic_dialog_alert)
-                        .setPositiveButton("确定", null).show()
-                }
-            });
-        }
-
-        fun deleteDialog(title: String, message: String, icon: Int, action: () -> Unit) {
-            AlertDialog.Builder(act)
-                .setTitle(title)
-                .setMessage(message)
-                .setIcon(icon)
-                .setPositiveButton("删除") { _, _ ->
-                    val pd = ProgressDialog(act)
-                    pd.setMessage("正在删除")
-                    pd.show()
-                    pd.setCancelable(false)
-                    Thread {
-                        action()
-                        act.runOnUiThread {
-                            pd.setCancelable(true)
-                            pd.setMessage("正在更新列表")
-                        }
-                        act.updateStickerList()
-                        act.runOnUiThread { pd.dismiss() }
-                    }.start()
-                }
-                .setNegativeButton("算了", null).show()
-        }
-
-        val dialogDelExported = {
-            deleteDialog(
-                title = "删除导出缓存 ${s.name}",
-                message = "你将删除已缓存的表情包集 ${s.name}，这不会影响已同步的表情包，是否继续？",
-                icon = android.R.drawable.ic_menu_delete,
-            ) {
-                File("$destDataPath/tgSync_${s.id}").deleteRecursively()
-                File("$stickerDataPath/${s.hash}").delete()
-            }
-        }
-
-        holder.rmBtn.setOnClickListener {
-            // dialog confirm
-            if (holder.unsupported.isVisible) {
-                dialogDelExported()
-            } else {
-                deleteDialog(
-                    title = "删除已同步的表情包集 ${s.name}",
-                    message = "你将删除已同步的表情包集 ${s.name}，这将会删除 ${s.syncedState.all} 个表情包文件，是否继续？",
-                    icon = android.R.drawable.ic_dialog_alert,
-                ) {
-                    File("$realDataPath/tgSync_${s.id}").deleteRecursively()
-                }
-            }
-        }
-
-        holder.rmBtn.setOnLongClickListener {
-            dialogDelExported()
-            true
-        }
-        //        holder.hash.text = stickerList[position].hash
-    }
-
-    override fun getItemCount(): Int {
-        return stickerList.size
-    }
-
+fun effectiveSyncQuality(info: StickerInfo, selected: SyncQuality?): SyncQuality = when {
+    info.remoteState.highQuality > 0 && info.remoteState.lowQuality == 0 -> SyncQuality.HIGH
+    info.remoteState.lowQuality > 0 && info.remoteState.highQuality == 0 -> SyncQuality.LOW
+    else -> selected ?: if (info.remoteState.highQuality > 0) SyncQuality.HIGH else SyncQuality.LOW
 }
 
-class MainActivity : BaseActivity<ActivityMainBinding>() {
+class MainActivity : AppCompatActivity() {
 
     private fun requestPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -225,6 +83,8 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             startActivityForResult(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
                 data = Uri.parse("package:" + this@MainActivity.packageName)
             }, 2339)
+        } else {
+            loadStickerList()
         }
     }
 
@@ -235,99 +95,159 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             Toast.LENGTH_LONG
         ).show()
 
-        updateStickerList()
+        loadStickerList()
     }
 
-    public fun syncStickerPack(info: StickerInfo, finished: () -> Unit, error: (Int, String) -> Unit) {
+    private fun loadStickerList() {
+        operationProgress = OperationProgress("正在加载表情包", "扫描已导出的表情包")
+        thread {
+            val result = runCatching { updateStickerList() }
+            runOnUiThread {
+                operationProgress = null
+                result.onFailure {
+                    YLog.error("Error while loading stickers", it)
+                    Toast.makeText(this, "加载表情包失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun syncStickerPack(
+        info: StickerInfo,
+        quality: SyncQuality,
+        finished: () -> Unit,
+        error: (Int, String) -> Unit,
+        packIndex: Int = 0,
+        packCount: Int = 1
+    ) {
         val act = this
         val s = info
         act.runOnUiThread {
-            val pd = ProgressDialog(act).apply {
-                setMessage("正在同步")
-                show()
-                setCancelable(false)
-            }
-            var failCount = 0
-            var failReasons = ""
+            operationProgress = OperationProgress("正在同步", s.name, packIndex.toFloat() / packCount, expressive = true)
             thread(true) {
-                val remoteFolder = "$destDataPath/tgSync_${s.id}"
-                val syncedFolder = "$realDataPath/tgSync_${s.id}"
-                File(syncedFolder).mkdirs()
+                try {
+                    val remoteFolder = "$destDataPath/tgSync_${s.id}"
+                    val syncedFolder = "$realDataPath/tgSync_${s.id}"
+                    File(syncedFolder).mkdirs()
 
-                if (!File(nomediaPath2).exists()) {
-                    File(nomediaPath2).createNewFile()
-                }
-
-                val remoteFileList = File(remoteFolder).listFiles() ?: emptyArray()
-
-                for ((index, remoteFile) in remoteFileList.withIndex()) {
-                    val nameWithoutExt = remoteFile.name.substringBefore(".")
-                    val id = nameWithoutExt.substringBefore("_")
-
-                    val existing = File(syncedFolder).listFiles()?.filter { it.name.startsWith(id) }
-                        ?: emptyList()
-
-                    when(remoteFile.extension) {
-                        "webp"->{
-                            try {
-                                val outPathPng = "${syncedFolder}/${nameWithoutExt}.png"
-                                val decoder = ImageDecoder.createSource(remoteFile)
-                                val bitmap = ImageDecoder.decodeBitmap(decoder)
-                                val out = File(outPathPng)
-                                out.outputStream().buffered().use {
-                                    bitmap.compress(
-                                        android.graphics.Bitmap.CompressFormat.PNG,
-                                        100,
-                                        it
-                                    )
-                                }
-
-                                for (file in existing) {
-                                    if(file.extension == "webp")
-                                        file.delete()
-                                    if(file.extension == "png" && file.name != "${nameWithoutExt}.png")
-                                        file.delete()
-                                }
-                            } catch (e: Exception) {
-                                YLog.error("Error while converting webp to png", e)
-                                failReasons += "$id: Error while converting webp to png: ${e.message}\n"
-                                failCount++
-                            }
-                        }
-                        "webm"->{
-                            // encode to gif
-                            val outPath = "${syncedFolder}/${nameWithoutExt}.gif"
-                            if (!File(outPath).exists()) {
-
-                                val session = FFmpegKit.execute(
-                                    if(act.useHighQualityGif)
-                                        "-i ${remoteFile.absolutePath} -lavfi split[v],palettegen,[v]paletteuse -f gif ${outPath}"
-                                    else
-                                        "-i ${remoteFile.absolutePath} -vf scale=320:-1 -r 10 -f gif ${outPath}"
-                                )
-                                if (session.returnCode.isValueSuccess) {
-                                    YLog.info("FFmpegKit: ${session.command} finished successfully")
-                                } else {
-                                    YLog.error("FFmpegKit: ${session.command} failed with state ${session.state} and rc ${session.returnCode}")
-                                    failReasons += "$id: FFmpegKit: ${session.command} failed with state ${session.state} and rc ${session.returnCode}\n"
-                                    failCount++
-                                }
-                            }
-                        }
+                    if (!File(nomediaPath2).exists()) {
+                        File(nomediaPath2).createNewFile()
                     }
 
-                    act.runOnUiThread { pd.setMessage("正在同步 ${index}/${remoteFileList.size}") }
-                }
-                act.runOnUiThread { pd.setMessage("正在更新列表") }
-                act.updateStickerList()
-                act.runOnUiThread { pd.dismiss() }
+                    val remoteFileList = File(remoteFolder).listFiles().orEmpty()
+                        .filter { it.isFile && it.extension.lowercase() in setOf("webp", "webm") }
+                        .groupBy { it.nameWithoutExtension.substringBefore('_') }
+                        .values.map { files ->
+                            val preferred = files.filter { it.nameWithoutExtension.endsWith(quality.suffix) }
+                            val fallback = files.filter {
+                                it.nameWithoutExtension.endsWith(
+                                    if (quality == SyncQuality.HIGH) SyncQuality.LOW.suffix else SyncQuality.HIGH.suffix
+                                )
+                            }
+                            (preferred.ifEmpty { fallback }.ifEmpty { files })
+                                .maxBy { if (it.extension.equals("webm", ignoreCase = true)) 1 else 0 }
+                        }
+                    if (remoteFileList.isEmpty()) {
+                        error(1, "${s.name}: 没有可同步的表情文件")
+                        return@thread
+                    }
 
-                if (failCount > 0) {
-                    error(failCount, failReasons)
-                } else {
-                    finished();
+                    val completed = AtomicInteger(0)
+                    var displayed = 0
+                    val workers = Executors.newFixedThreadPool(32)
+                    val failures = try {
+                        workers.invokeAll(remoteFileList.map { remoteFile ->
+                            Callable {
+                                val failure = syncStickerFile(remoteFile, File(syncedFolder))
+                                val done = completed.incrementAndGet()
+                                act.runOnUiThread {
+                                    if (done > displayed) {
+                                        displayed = done
+                                        operationProgress = OperationProgress(
+                                            "正在同步",
+                                            "${s.name} · $done/${remoteFileList.size}",
+                                            (packIndex + done.toFloat() / remoteFileList.size) / packCount,
+                                            expressive = true
+                                        )
+                                    }
+                                }
+                                failure
+                            }
+                        }).mapNotNull { it.get() }
+                    } finally {
+                        workers.shutdownNow()
+                    }
+                    act.runOnUiThread {
+                        operationProgress = OperationProgress(
+                            "正在更新列表", s.name, (packIndex + 1f) / packCount,
+                            expressive = true
+                        )
+                    }
+                    act.updateStickerList()
+
+                    if (failures.isNotEmpty()) {
+                        error(failures.size, failures.joinToString(separator = "\n"))
+                    } else {
+                        finished();
+                    }
+                } catch (exception: Exception) {
+                    YLog.error("Error while syncing ${s.name}", exception)
+                    error(1, exception.message ?: "同步失败")
                 }
             }
+        }
+    }
+
+    private fun syncStickerFile(remoteFile: File, syncedFolder: File): String? {
+        val baseName = remoteFile.nameWithoutExtension
+        val id = baseName.substringBefore('_')
+        val output = File(syncedFolder, "$baseName.png")
+        return try {
+            when (remoteFile.extension.lowercase()) {
+                "webp" -> {
+                    val source = ImageDecoder.createSource(remoteFile)
+                    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    }
+                    try {
+                        output.outputStream().buffered().use {
+                            if (!bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) {
+                                throw IOException("PNG 编码失败")
+                            }
+                        }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+                "webm" -> if (!output.exists()) {
+                    val temporary = File(syncedFolder, "$baseName.png.tmp")
+                    try {
+                        val session = FFmpegKit.execute(
+                            "-y -i \"${remoteFile.absolutePath}\" -vsync 0 -pix_fmt rgba " +
+                                "-c:v apng -f apng -plays 0 \"${temporary.absolutePath}\""
+                        )
+                        if (!session.returnCode.isValueSuccess || temporary.length() == 0L) {
+                            throw IOException("APNG 转换失败，返回码 ${session.returnCode}")
+                        }
+                        if (!temporary.renameTo(output)) throw IOException("无法保存 APNG 文件")
+                    } finally {
+                        temporary.delete()
+                    }
+                }
+                else -> throw IOException("不支持的格式：${remoteFile.extension}")
+            }
+            if (output.exists()) {
+                syncedFolder.listFiles().orEmpty()
+                    .filter {
+                        it != output && it.nameWithoutExtension.substringBefore('_') == id &&
+                            it.extension in setOf("png", "gif", "webp")
+                    }
+                    .forEach { it.delete() }
+            }
+            null
+        } catch (e: Exception) {
+            YLog.error("Error while syncing $baseName", e)
+            "$id: ${e.message ?: "转换失败"}"
         }
     }
 
@@ -349,161 +269,197 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
 
     }
 
-    var filter = ""
-    var requiresSyncOnly = false
-    var useHighQualityGif = false
+    private var filter by mutableStateOf("")
+    private var moduleActive by mutableStateOf(false)
+    private var visibleStickers by mutableStateOf<List<StickerInfo>>(emptyList())
+    private var operationProgress by mutableStateOf<OperationProgress?>(null)
+    private var refreshing by mutableStateOf(false)
+    private var deleteConfirmation by mutableStateOf<DeleteConfirmation?>(null)
+    private val qualitySelections = mutableStateMapOf<String, SyncQuality>()
+    private val qualityPreferences by lazy { getSharedPreferences("sync_quality", MODE_PRIVATE) }
 
-    fun onFilterChanged(list: List<StickerInfo>? = stickerList.value) {
-        if (list == null) return
-        (binding.stickerManageView.adapter as RecyclerAdapterStickerList).stickerList = list.filter {
-            if (requiresSyncOnly
-                && it.syncedState.all >= it.remoteState.all
-                && it.syncedState.highQuality >= it.remoteState.highQuality
-            ) return@filter false
+    private fun selectedQuality(info: StickerInfo): SyncQuality =
+        effectiveSyncQuality(info, qualitySelections[info.id])
 
-            it.name.contains(filter, ignoreCase = true) || it.id.contains(filter, ignoreCase = true)
-                    || it.type.contains(filter, ignoreCase = true)
-        }
-        binding.stickerManageView.adapter?.notifyDataSetChanged()
+    private fun changeQuality(info: StickerInfo, quality: SyncQuality) {
+        qualitySelections[info.id] = quality
+        qualityPreferences.edit().putString(info.id, quality.name).apply()
     }
 
-    @SuppressLint("NotifyDataSetChanged")
-    override fun onCreate() {
+    private fun onFilterChanged(list: List<StickerInfo>? = stickerList.value) {
+        list.orEmpty().forEach { info ->
+            if (!qualitySelections.containsKey(info.id)) {
+                qualityPreferences.getString(info.id, null)?.let { saved ->
+                    runCatching { SyncQuality.valueOf(saved) }.getOrNull()?.let {
+                        qualitySelections[info.id] = it
+                    }
+                }
+            }
+        }
+        visibleStickers = list.orEmpty().filter {
+            it.name.contains(filter, ignoreCase = true) ||
+                it.id.contains(filter, ignoreCase = true) ||
+                it.type.contains(filter, ignoreCase = true)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val transparent = android.graphics.Color.TRANSPARENT
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(transparent, transparent),
+            navigationBarStyle = SystemBarStyle.auto(transparent, transparent)
+        )
+        super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        supportActionBar?.hide()
+        stickerList.observe(this) { onFilterChanged(it) }
         refreshModuleStatus()
+        setContent {
+            StickerProviderScreen(
+                moduleActive = moduleActive,
+                version = getString(R.string.module_version, BuildConfig.VERSION_NAME),
+                progress = operationProgress,
+                refreshing = refreshing,
+                deleteConfirmation = deleteConfirmation,
+                qualitySelections = qualitySelections,
+                stickers = visibleStickers,
+                search = filter,
+                onSearchChange = { filter = it; onFilterChanged() },
+                onRefresh = ::refreshStickers,
+                onSyncAll = ::syncAllStickers,
+                onReset = ::resetCache,
+                onSync = ::syncOneSticker,
+                onQualityChange = ::changeQuality,
+                onDeleteSynced = ::deleteSynced,
+                onDeleteExported = ::deleteExported,
+                onConfirmDelete = ::performConfirmedDelete,
+                onDismissDelete = { deleteConfirmation = null }
+            )
+        }
         requestPermission()
-        binding.mainTextVersion.text = getString(R.string.module_version, BuildConfig.VERSION_NAME)
-        binding.button2.setOnClickListener {
-            binding.tips.visibility = View.GONE
-            binding.manage.visibility = View.VISIBLE
-        }
-        binding.requiresSyncOnlySwitch.setOnCheckedChangeListener { _, isChecked ->
-            requiresSyncOnly = isChecked
-            onFilterChanged()
-        }
-        binding.gifQualitySwitch.setOnCheckedChangeListener { _, isChecked ->
-            useHighQualityGif = isChecked
-        }
-        binding.resetBtn.setOnClickListener {
-            AlertDialog.Builder(this)
-                .setTitle("清除已同步的表情包集缓存")
-                .setMessage("你将清除导出表情包集的缓存，这不会影响已同步的表情包，是否继续？")
-                .setIcon(android.R.drawable.ic_dialog_alert)
-                .setPositiveButton("删除") { _, _ ->
-                    val pd = ProgressDialog(this).apply {
-                        setMessage("正在清除")
-                        show()
-                        setCancelable(false)
-                    }
-                    thread(true) {
-                        File(exposedPath).deleteRecursively()
-                        this.stickerList.postValue(listOf())
-                        pd.dismiss()
-                    }
-                }
-                .setNegativeButton("算了", null).show()
-        }
+    }
 
-        binding.syncAllBtn.setOnClickListener {
+    private fun resetCache() {
+        confirmDelete(
+            "清除表情包导出缓存",
+            "将清除已导出的表情包缓存，已同步的文件不会受影响。",
+            confirmLabel = "清除",
+            iconRes = R.drawable.ic_archive
+        ) {
+            File(exposedPath).deleteRecursively()
+            stickerList.postValue(emptyList())
+        }
+    }
+
+    private fun refreshStickers() {
+        if (refreshing) return
+        refreshing = true
+        thread {
+            val result = runCatching { updateStickerList() }
             runOnUiThread {
-                if (stickerList.value.isNullOrEmpty()) {
-                    Toast.makeText(this, "表情包为空", Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
-                }
-                val pd = ProgressDialog(this).apply {
-                    setMessage("正在同步")
-                    show()
-                    setCancelable(false)
-                }
-
-                thread(true) {
-                    var failCount = 0
-                    var failReasons = ""
-
-                    fun syncIndex(index: Int) {
-                        val s = stickerList.value?.get(index) ?: return
-                        var index = index
-                        syncStickerPack(s, {
-                            index++
-                            if (index < (stickerList.value?.size ?: 0)) {
-                                syncIndex(index)
-                            } else {
-                                runOnUiThread {
-                                    pd.dismiss()
-                                    Toast.makeText(this, "同步完成", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }, { count, reasons ->
-                            failCount += count
-                            failReasons += reasons
-                            index++
-                            if (index < (stickerList.value?.size ?: 0)) {
-                                syncIndex(index)
-                            } else {
-                                runOnUiThread {
-                                    pd.dismiss()
-                                    AlertDialog.Builder(this)
-                                        .setTitle("有 $failCount 个表情同步失败")
-                                        .setMessage(failReasons)
-                                        .setIcon(android.R.drawable.ic_dialog_alert)
-                                        .setPositiveButton("确定", null).show()
-                                }
-                            }
-                        })
-                    }
-                    syncIndex(0);
-                }
-
+                refreshing = false
+                result.onFailure { YLog.error("Error while refreshing stickers", it) }
+                Toast.makeText(this, if (result.isSuccess) "表情包列表已刷新" else "刷新失败", Toast.LENGTH_SHORT).show()
             }
         }
+    }
 
-        binding.refreshBtn.setOnClickListener {
-            val pd = ProgressDialog(this).apply {
-                setMessage("正在更新")
-                show()
-                setCancelable(false)
+    private fun syncOneSticker(info: StickerInfo) {
+        syncStickerPack(info, selectedQuality(info), {
+            runOnUiThread {
+                operationProgress = null
+                Toast.makeText(this, "同步完成", Toast.LENGTH_SHORT).show()
             }
-            thread(true) {
-                updateStickerList()
-                pd.dismiss()
-                runOnUiThread {
-                    Toast.makeText(
-                        this,
-                        "共刷新${this.stickerList.value?.size ?: 0}个贴纸包",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        }
-
-        binding.searchBar.doOnTextChanged() { text, _, _, _ ->
-            filter = text.toString()
-            onFilterChanged()
-        }
-
-        binding.stickerManageView.layoutManager = LinearLayoutManager(this)
-        binding.stickerManageView.adapter = RecyclerAdapterStickerList(this)
-        binding.stickerManageView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                if(newState == RecyclerView.SCROLL_STATE_IDLE || newState == RecyclerView.SCROLL_STATE_DRAGGING) {
-                    Glide.with(this@MainActivity).resumeRequests()
-                } else {
-                    Glide.with(this@MainActivity).pauseRequests()
-                }
-                super.onScrollStateChanged(recyclerView, newState)
+        }, { count, reasons ->
+            runOnUiThread {
+                operationProgress = null
+                showSyncErrors(count, reasons)
             }
         })
-//        try {
-//            binding.stickerManageView.javaClass.getDeclaredField("mMaxFlingVelocity").let {
-//                it.isAccessible = true
-//                it.set(binding.stickerManageView, 1000)
-//            }
-//        } catch (e: Exception) {
-//            YLog.error("Error while setting max fling velocity", e)
-//        }
+    }
 
-        stickerList.observe(this) { list ->
+    private fun syncAllStickers() {
+        val items = stickerList.value.orEmpty().filter { it.type == "unknown" || it.type == "image/webp" || it.type == "video/webm" }
+        if (items.isEmpty()) {
+            Toast.makeText(this, "没有可同步的表情包", Toast.LENGTH_SHORT).show()
+            return
+        }
+        var failCount = 0
+        val reasons = StringBuilder()
+        fun next(index: Int) {
+            if (index == items.size) {
+                runOnUiThread {
+                    operationProgress = null
+                    if (failCount > 0) showSyncErrors(failCount, reasons.toString())
+                    else Toast.makeText(this, "同步完成", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+            syncStickerPack(items[index], selectedQuality(items[index]), { next(index + 1) }, { count, detail ->
+                failCount += count
+                reasons.append(detail)
+                next(index + 1)
+            }, packIndex = index, packCount = items.size)
+        }
+        next(0)
+    }
+
+    private fun showSyncErrors(count: Int, reasons: String) {
+        AlertDialog.Builder(this)
+            .setTitle("有 $count 个表情同步失败")
+            .setMessage(reasons)
+            .setPositiveButton("确定", null)
+            .show()
+    }
+
+    private fun deleteSynced(info: StickerInfo) {
+        confirmDelete(
+            "删除已同步的表情包 ${info.name}",
+            "这将删除 ${info.syncedState.all} 个已同步的表情文件。",
+            confirmLabel = "删除",
+            iconRes = R.drawable.ic_delete
+        ) { File("$realDataPath/tgSync_${info.id}").deleteRecursively() }
+    }
+
+    private fun deleteExported(info: StickerInfo) {
+        confirmDelete(
+            "删除导出缓存 ${info.name}",
+            "这将删除已缓存的表情包，不影响已同步的文件。",
+            confirmLabel = "清除",
+            iconRes = R.drawable.ic_archive
+        ) {
+            File("$destDataPath/tgSync_${info.id}").deleteRecursively()
+            File("$stickerDataPath/${info.hash}").delete()
+        }
+    }
+
+    private fun confirmDelete(
+        title: String,
+        message: String,
+        confirmLabel: String,
+        iconRes: Int,
+        action: () -> Unit
+    ) {
+        deleteConfirmation = DeleteConfirmation(title, message, confirmLabel, iconRes, action)
+    }
+
+    private fun performConfirmedDelete() {
+        val confirmation = deleteConfirmation ?: return
+        deleteConfirmation = null
+        operationProgress = OperationProgress("正在删除", confirmation.title)
+        thread {
+            val result = runCatching {
+                confirmation.action()
+                updateStickerList()
+            }
             runOnUiThread {
-                onFilterChanged(list)
+                operationProgress = null
+                result.onFailure {
+                    YLog.error("Error while deleting stickers", it)
+                    Toast.makeText(this, "删除失败", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -546,7 +502,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
 
         val stickerList = mutableListOf<StickerInfo>()
 
-        for (file in File(stickerDataPath).listFiles()!!) {
+        for (file in File(stickerDataPath).listFiles().orEmpty()) {
             try {
                 val hash = file.name
                 if (!file.name.endsWith(".stickerData.txt.jpg")) continue
@@ -615,17 +571,6 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
      * 刷新模块状态
      */
     private fun refreshModuleStatus() {
-        binding.mainLinStatus.setBackgroundResource(
-            if (YukiHookAPI.Status.isModuleActive) R.drawable.bg_green_round
-            else R.drawable.bg_dark_round
-        )
-        binding.mainImgStatus.setImageResource(
-            if (YukiHookAPI.Status.isModuleActive) R.mipmap.ic_success
-            else R.mipmap.ic_warn
-        )
-        binding.mainTextStatus.text = getString(
-            if (YukiHookAPI.Status.isModuleActive) R.string.module_is_activated
-            else R.string.module_not_activated
-        )
+        moduleActive = YukiHookAPI.Status.isModuleActive
     }
 }

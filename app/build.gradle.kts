@@ -1,6 +1,7 @@
 plugins {
     autowire(libs.plugins.android.application)
     autowire(libs.plugins.kotlin.android)
+    autowire(libs.plugins.kotlin.compose)
     autowire(libs.plugins.kotlin.ksp)
 }
 
@@ -22,9 +23,15 @@ android {
     }
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     compileOptions {
@@ -41,7 +48,7 @@ android {
     }
     buildFeatures {
         buildConfig = true
-        viewBinding = true
+        compose = true
     }
     lint { checkReleaseBuilds = false }
     // TODO Please visit https://highcapable.github.io/YukiHookAPI/en/api/special-features/host-inject
@@ -50,17 +57,20 @@ android {
 }
 
 dependencies {
-    implementation("com.google.android.material:material:1.11.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("androidx.recyclerview:recyclerview")
+    val composeBom = platform("androidx.compose:compose-bom:2024.02.02")
+    implementation(composeBom)
+    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3:1.5.0-alpha18")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    debugImplementation("androidx.compose.ui:ui-tooling")
     compileOnly(de.robv.android.xposed.api)
     implementation(com.highcapable.yukihookapi.api)
     ksp(com.highcapable.yukihookapi.ksp.xposed)
-    implementation(com.github.duanhong169.drawabletoolbox)
     implementation(androidx.core.core.ktx)
     implementation(androidx.appcompat.appcompat)
     implementation(com.google.android.material.material)
-    implementation(androidx.constraintlayout.constraintlayout)
     testImplementation(junit.junit)
     androidTestImplementation(androidx.test.ext.junit)
     androidTestImplementation(androidx.test.espresso.espresso.core)
