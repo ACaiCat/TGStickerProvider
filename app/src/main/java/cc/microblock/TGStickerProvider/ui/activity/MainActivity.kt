@@ -136,6 +136,10 @@ class MainActivity : AppCompatActivity() {
                         File(nomediaPath2).createNewFile()
                     }
 
+                    val stickerPositions = File(stickerDataPath, s.hash).readLines().drop(4)
+                        .mapIndexedNotNull { index, line ->
+                            line.trim().toLongOrNull()?.let { it.toString() to index }
+                        }.toMap()
                     val remoteFileList = File(remoteFolder).listFiles().orEmpty()
                         .filter { it.isFile && it.extension.lowercase() in setOf("webp", "webm") }
                         .groupBy { it.nameWithoutExtension.substringBefore('_') }
@@ -148,36 +152,58 @@ class MainActivity : AppCompatActivity() {
                             }
                             (preferred.ifEmpty { fallback }.ifEmpty { files })
                                 .maxBy { if (it.extension.equals("webm", ignoreCase = true)) 1 else 0 }
-                        }
+                        }.sortedWith(compareBy { remoteFile ->
+                            stickerPositions[remoteFile.nameWithoutExtension.substringBefore('_')] ?: Int.MAX_VALUE
+                        })
                     if (remoteFileList.isEmpty()) {
                         error(1, "${s.name}: 没有可同步的表情文件")
                         return@thread
                     }
 
+                    val syncedDirectory = File(syncedFolder)
+                    val stagingDirectory = File(realDataPath, ".tgsp-stage-${s.id}")
+                    restoreStagedBackups(stagingDirectory, syncedDirectory)
+                    if (stagingDirectory.exists() && !stagingDirectory.deleteRecursively()) {
+                        throw IOException("无法清理上次同步的临时文件")
+                    }
+                    if (!stagingDirectory.mkdirs()) throw IOException("无法创建同步临时目录")
+
                     val completed = AtomicInteger(0)
                     var displayed = 0
                     val workers = Executors.newFixedThreadPool(32)
                     val failures = try {
-                        workers.invokeAll(remoteFileList.map { remoteFile ->
-                            Callable {
-                                val failure = syncStickerFile(remoteFile, File(syncedFolder))
-                                val done = completed.incrementAndGet()
-                                act.runOnUiThread {
-                                    if (done > displayed) {
-                                        displayed = done
-                                        operationProgress = OperationProgress(
-                                            "正在同步",
-                                            "${s.name} · $done/${remoteFileList.size}",
-                                            (packIndex + done.toFloat() / remoteFileList.size) / packCount,
-                                            expressive = true
-                                        )
+                        val conversionResults = try {
+                            workers.invokeAll(remoteFileList.map { remoteFile ->
+                                Callable {
+                                    val failure = syncStickerFile(remoteFile, stagingDirectory)
+                                    val done = completed.incrementAndGet()
+                                    act.runOnUiThread {
+                                        if (done > displayed) {
+                                            displayed = done
+                                            operationProgress = OperationProgress(
+                                                "正在同步",
+                                                "${s.name} · $done/${remoteFileList.size}",
+                                                (packIndex + done.toFloat() / remoteFileList.size) / packCount,
+                                                expressive = true
+                                            )
+                                        }
                                     }
+                                    failure
                                 }
-                                failure
-                            }
-                        }).mapNotNull { it.get() }
+                            }).map { it.get() }
+                        } finally {
+                            workers.shutdownNow()
+                        }
+                        act.runOnUiThread {
+                            operationProgress = OperationProgress("正在整理贴纸", s.name, (packIndex + 1f) / packCount, expressive = true)
+                        }
+                        publishStickersInOrder(
+                            remoteFileList, conversionResults, stickerPositions,
+                            stagingDirectory, syncedDirectory
+                        )
                     } finally {
-                        workers.shutdownNow()
+                        restoreStagedBackups(stagingDirectory, syncedDirectory)
+                        stagingDirectory.deleteRecursively()
                     }
                     act.runOnUiThread {
                         operationProgress = OperationProgress(
@@ -198,6 +224,78 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun stickerId(file: File): String = file.nameWithoutExtension.substringBefore('_')
+
+    private fun isSyncedSticker(file: File): Boolean =
+        file.isFile && file.extension.lowercase() in setOf("png", "gif", "webp")
+
+    private fun restoreStagedBackups(stagingDirectory: File, syncedDirectory: File) {
+        val backupDirectory = File(stagingDirectory, "previous")
+        val currentIds = syncedDirectory.listFiles().orEmpty()
+            .filter(::isSyncedSticker).map(::stickerId).toSet()
+        backupDirectory.listFiles().orEmpty().filter(::isSyncedSticker).sortedBy { it.name }
+            .filter { stickerId(it) !in currentIds }
+            .forEach { old ->
+                Files.move(old.toPath(), File(syncedDirectory, old.name).toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+    }
+
+    private fun publishStickersInOrder(
+        remoteFiles: List<File>,
+        conversionResults: List<String?>,
+        stickerPositions: Map<String, Int>,
+        stagingDirectory: File,
+        syncedDirectory: File
+    ): List<String> {
+        val backupDirectory = File(stagingDirectory, "previous")
+        if (!backupDirectory.mkdirs()) throw IOException("无法创建贴纸备份目录")
+        syncedDirectory.listFiles().orEmpty().filter(::isSyncedSticker).forEach { old ->
+            Files.move(old.toPath(), File(backupDirectory, old.name).toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+
+        val remoteById = remoteFiles.mapIndexed { index, file ->
+            stickerId(file) to (file to conversionResults[index])
+        }.toMap()
+        val backupsById = backupDirectory.listFiles().orEmpty().filter(::isSyncedSticker).groupBy(::stickerId)
+        val orderedIds = (remoteFiles.map(::stickerId) + backupsById.keys).distinct()
+            .withIndex()
+            .sortedWith(compareBy<IndexedValue<String>> { stickerPositions[it.value] ?: Int.MAX_VALUE }
+                .thenBy { it.index })
+            .map { it.value }
+        val failures = mutableListOf<String>()
+        val firstTimestamp = System.currentTimeMillis() - orderedIds.size * 1000L
+
+        orderedIds.forEachIndexed { index, id ->
+            val selected = remoteById[id]
+            var published = false
+            if (selected != null) {
+                val (remoteFile, conversionFailure) = selected
+                if (conversionFailure == null) {
+                    val staged = File(stagingDirectory, "${remoteFile.nameWithoutExtension}.png")
+                    val output = File(syncedDirectory, staged.name)
+                    try {
+                        if (!staged.isFile) throw IOException("转换结果不存在")
+                        Files.move(staged.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                        output.setLastModified(firstTimestamp + index * 1000L)
+                        published = true
+                    } catch (e: Exception) {
+                        failures.add("$id: ${e.message ?: "保存失败"}")
+                    }
+                } else {
+                    failures.add(conversionFailure)
+                }
+            }
+            if (!published) {
+                backupsById[id].orEmpty().forEach { old ->
+                    val restored = File(syncedDirectory, old.name)
+                    Files.move(old.toPath(), restored.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    restored.setLastModified(firstTimestamp + index * 1000L)
+                }
+            }
+        }
+        return failures
     }
 
     private fun syncStickerFile(remoteFile: File, syncedFolder: File): String? {

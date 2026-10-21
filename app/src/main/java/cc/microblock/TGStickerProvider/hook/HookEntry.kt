@@ -141,7 +141,8 @@ class HookEntry : IYukiHookXposedInit {
                                         stickerSet.set.short_name + "\n" +
                                                 stickerSet.set.title + "\n" +
                                                 stickerSet.set.count + "\n" +
-                                                stickerSet.documents[0]?.mime_type
+                                                stickerSet.documents[0]?.mime_type + "\n" +
+                                                stickerSet.documents.joinToString("\n") { it.id.toString() }
                                     )
                                 } catch (e: Exception) {
                                     if (e is FileNotFoundException && e.message?.contains("open failed:") == true)
