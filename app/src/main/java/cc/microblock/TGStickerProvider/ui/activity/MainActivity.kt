@@ -26,6 +26,8 @@ import com.highcapable.yukihookapi.YukiHookAPI
 import com.highcapable.yukihookapi.hook.log.YLog
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -219,17 +221,17 @@ class MainActivity : AppCompatActivity() {
                         bitmap.recycle()
                     }
                 }
-                "webm" -> if (!output.exists()) {
+                "webm" -> {
                     val temporary = File(syncedFolder, "$baseName.png.tmp")
                     try {
                         val session = FFmpegKit.execute(
-                            "-y -i \"${remoteFile.absolutePath}\" -vsync 0 -pix_fmt rgba " +
+                            "-y -c:v libvpx-vp9 -i \"${remoteFile.absolutePath}\" -vsync 0 -pix_fmt rgba " +
                                 "-c:v apng -f apng -plays 0 \"${temporary.absolutePath}\""
                         )
                         if (!session.returnCode.isValueSuccess || temporary.length() == 0L) {
                             throw IOException("APNG 转换失败，返回码 ${session.returnCode}")
                         }
-                        if (!temporary.renameTo(output)) throw IOException("无法保存 APNG 文件")
+                        Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING)
                     } finally {
                         temporary.delete()
                     }
